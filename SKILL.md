@@ -24,22 +24,30 @@ Use the right user shape:
 
 Use the package matching the app: `@stackframe/stack` for Next.js, `@stackframe/react` for React, `@stackframe/js` for vanilla JS.
 
-The Stack packages export Convex-specific subpaths:
+Import `getConvexProvidersConfig` from the package matching the app:
 
-- `@stackframe/stack/convex-auth.config`
+- `@stackframe/stack` for Next.js
+- `@stackframe/react` for React
+- `@stackframe/js` for vanilla JS
+
+Use the Convex component subpath that matches the package:
+
 - `@stackframe/stack/convex.config`
-- equivalent subpaths exist for `@stackframe/react` and `@stackframe/js`
+- equivalent `convex.config` subpaths exist for `@stackframe/react` and `@stackframe/js`
 
 Set the same Stack Auth environment variables in both the app runtime and the Convex deployment environment. At minimum Convex needs the project ID and, for server-side Stack calls from Convex actions, the secret server key.
 
+Set `projectId` to the exact env var configured in Convex, usually `STACK_PROJECT_ID` or `NEXT_PUBLIC_STACK_PROJECT_ID`. Choose one confirmed project ID env var.
+
 ```ts
 // convex/auth.config.ts
-import { getConvexProvidersConfig } from "@stackframe/stack/convex-auth.config";
+import { getConvexProvidersConfig } from "@stackframe/stack"; // Next.js
+// or import from "@stackframe/react" for React
+// or import from "@stackframe/js" for vanilla JS
 
 export default {
   providers: getConvexProvidersConfig({
-    projectId: process.env.NEXT_PUBLIC_STACK_PROJECT_ID!,
-    baseUrl: process.env.NEXT_PUBLIC_STACK_API_URL,
+    projectId: process.env.STACK_PROJECT_ID,
   }),
 };
 ```
