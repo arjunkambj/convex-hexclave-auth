@@ -1,0 +1,4 @@
+interface:
+  display_name: "Stack Auth Convex"
+  short_description: "Stack Auth and Convex auth guidance"
+  default_prompt: "Use $stack-auth-convex to wire Stack Auth into Convex and review the auth flow."
