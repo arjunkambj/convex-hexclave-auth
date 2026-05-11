@@ -1,6 +1,6 @@
 ---
 name: stack-auth-convex
-description: Use when integrating Stack Auth with Convex, especially for Convex auth.config.ts, convex.config.ts, getPartialUser in Convex queries/mutations, Stack user access in Next.js route handlers, and Convex fetchQuery/fetchMutation auth tokens.
+description: Use when integrating Stack Auth with Convex, especially for Convex auth.config.ts, convex.config.ts, full Stack users in Next.js route handlers, getPartialUser in Convex queries/mutations, and Convex fetchQuery/fetchMutation auth tokens.
 ---
 
 # Stack Auth Convex
@@ -17,8 +17,8 @@ Do not pass Stack Auth tokens in Convex query or mutation args. Args are busines
 
 Use the right user shape:
 
-- **Partial user**: `getPartialUser({ from: "convex", ctx })`. Use in Convex queries and mutations for identity, ownership, and simple auth gates. It comes from Convex JWT claims and has no team data.
 - **Full user**: `getUser(...)`. Use when code needs Stack Auth-backed data such as `selectedTeam`, `listTeams()`, team profiles, metadata updates, or other server user methods. Prefer Next.js route handlers or Convex actions for full-user work.
+- **Partial user**: `getPartialUser({ from: "convex", ctx })`. Use in Convex queries and mutations only for identity, ownership, and simple auth gates. It comes from Convex JWT claims and has no team data.
 
 ## Required Convex Setup
 
@@ -67,7 +67,7 @@ export default app;
 
 ## Stack App Imports In Monorepos
 
-Keep Stack app construction in a small shared module that can be imported by both Next.js and Convex code.
+Keep Stack app construction in a small module. In a Next.js app, `stack/server.ts` can also expose request helpers for route handlers.
 
 ```ts
 // stack/client.ts
@@ -81,21 +81,36 @@ export const stackClientApp = new StackClientApp({
 ```ts
 // stack/server.ts
 import { StackServerApp } from "@stackframe/stack";
+import { NextRequest, NextResponse } from "next/server";
 import { stackClientApp } from "./client";
 
 export const stackServerApp = new StackServerApp({
   inheritsFrom: stackClientApp,
 });
+
+export const getStackConvexToken = async (request: NextRequest) => {
+  const token = await stackServerApp.getConvexHttpClientAuth({
+    tokenStore: request,
+  });
+
+  if (token === "") {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  return token;
+};
 ```
+
+When using `getStackConvexToken`, narrow the result before passing it to Convex because unauthorized requests return a `NextResponse`.
 
 In a Turborepo, do not import `stackServerApp` from a Next.js route, page, layout, or any module with Next-only side effects. Import from a neutral shared module instead:
 
 ```ts
 // convex/myFunctions.ts
-import { stackServerApp } from "../stack/server";
+import { stackServerApp } from "../stack/convex";
 ```
 
-If the Convex code lives in a separate workspace package that does not depend on Next.js, prefer creating a Convex-safe Stack module there with `@stackframe/js` instead of importing from the Next app package. If the Convex directory is inside a Next.js app, importing `StackServerApp` from `@stackframe/stack` matches the repo example.
+If `stack/server.ts` imports `next/server` for `getStackConvexToken`, do not import that file from Convex functions. Use a Convex-safe Stack module for Convex code, usually with `@stackframe/js`, and keep the Next request helper in the Next app.
 
 ## Browser Convex Client
 
@@ -117,6 +132,38 @@ export function ConvexClientProvider(props: { children: React.ReactNode }) {
 
 `getConvexClientAuth({})` is valid when the Stack app already has a default token store, for example `tokenStore: "nextjs-cookie"`.
 
+## Full Stack User
+
+Use the full Stack user when code needs Stack Auth-backed data, especially teams, selected team, profiles, metadata, or server user methods. In Next.js route handlers, read the full user from the request before calling Convex.
+
+```ts
+import { stackServerApp } from "@/stack/server";
+import { NextRequest, NextResponse } from "next/server";
+
+export async function GET(request: NextRequest) {
+  const user = await stackServerApp.getUser({ tokenStore: request });
+
+  if (user == null) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const teams = await user.listTeams();
+
+  return NextResponse.json({
+    id: user.id,
+    primaryEmail: user.primaryEmail,
+    displayName: user.displayName,
+    selectedTeamId: user.selectedTeam?.id ?? null,
+    teams: teams.map((team) => ({
+      id: team.id,
+      displayName: team.displayName,
+    })),
+  });
+}
+```
+
+Prefer full users over partial users whenever the code depends on Stack Auth server data. Partial users are only for Convex-side identity checks.
+
 ## Convex Queries
 
 Use `getPartialUser` in queries. It returns token identity data only and may be `null`.
@@ -124,7 +171,7 @@ Use `getPartialUser` in queries. It returns token identity data only and may be 
 ```ts
 // convex/myFunctions.ts
 import { query } from "./_generated/server";
-import { stackServerApp } from "../stack/server";
+import { stackServerApp } from "../stack/convex";
 
 export const getUserInfo = query({
   args: {},
@@ -178,7 +225,7 @@ Use auth from `ctx`, not `userId` from client args:
 ```ts
 import { v } from "convex/values";
 import { mutation } from "./_generated/server";
-import { stackServerApp } from "../stack/server";
+import { stackServerApp } from "../stack/convex";
 
 export const createNote = mutation({
   args: {
@@ -209,7 +256,7 @@ Actions can call external services. Use them when the Convex function needs the 
 "use node";
 
 import { action } from "./_generated/server";
-import { stackServerApp } from "../stack/server";
+import { stackServerApp } from "../stack/convex";
 
 export const getFullStackUser = action({
   args: {},
@@ -261,17 +308,15 @@ const teams = await user.listTeams();
 ```ts
 // app/api/user-info/route.ts
 import { api } from "@/convex/_generated/api";
-import { stackServerApp } from "@/stack/server";
+import { getStackConvexToken, stackServerApp } from "@/stack/server";
 import { fetchMutation, fetchQuery } from "convex/nextjs";
 import { NextRequest, NextResponse } from "next/server";
 
 export async function GET(request: NextRequest) {
-  const token = await stackServerApp.getConvexHttpClientAuth({
-    tokenStore: request,
-  });
+  const token = await getStackConvexToken(request);
 
-  if (token === "") {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (token instanceof NextResponse) {
+    return token;
   }
 
   const user = await stackServerApp.getUser({ tokenStore: request });
@@ -307,12 +352,10 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const token = await stackServerApp.getConvexHttpClientAuth({
-    tokenStore: request,
-  });
+  const token = await getStackConvexToken(request);
 
-  if (token === "") {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (token instanceof NextResponse) {
+    return token;
   }
 
   const body = await request.json();
@@ -368,21 +411,24 @@ Use `ConvexHttpClient` directly when code already needs a client instance or is 
 
 ```ts
 import { api } from "@/convex/_generated/api";
-import { stackServerApp } from "@/stack/server";
+import { getStackConvexToken } from "@/stack/server";
 import { ConvexHttpClient } from "convex/browser";
+import { NextRequest, NextResponse } from "next/server";
 
-const token = await stackServerApp.getConvexHttpClientAuth({
-  tokenStore: request,
-});
+export async function GET(request: NextRequest) {
+  const token = await getStackConvexToken(request);
 
-if (token === "") {
-  throw new Error("User must be signed in before calling Convex.");
+  if (token instanceof NextResponse) {
+    return token;
+  }
+
+  const convex = new ConvexHttpClient(process.env.NEXT_PUBLIC_CONVEX_URL!);
+  convex.setAuth(token);
+
+  const result = await convex.query(api.myFunctions.getUserInfo, {});
+
+  return NextResponse.json(result);
 }
-
-const convex = new ConvexHttpClient(process.env.NEXT_PUBLIC_CONVEX_URL!);
-convex.setAuth(token);
-
-const result = await convex.query(api.myFunctions.getUserInfo, {});
 ```
 
 The Stack CLI intentionally does not auto-wire `ConvexHttpClient`; review those call sites manually.
@@ -392,6 +438,6 @@ The Stack CLI intentionally does not auto-wire `ConvexHttpClient`; review those 
 - Do not pass `{ token }` as the second argument to `fetchQuery`; that sends it to the Convex function as business args.
 - Do not expect `getPartialUser` to include teams. It only maps Convex JWT identity claims. Use full `getUser(...)` for `selectedTeam` and `listTeams()`.
 - Do not trust `userId` or `teamId` sent by the browser. Read the user from `ctx.auth` or from the Next.js request, then validate team membership before writing team-owned data.
-- Do not import Stack app instances from Next.js route/page/layout modules into Convex functions. Use a neutral shared `stack/server.ts` module or a workspace package.
+- Do not import Stack app instances from Next.js route/page/layout modules into Convex functions. Use a Convex-safe `stack/convex.ts` module or a workspace package.
 - Do not silently continue when `token === ""` or `user == null`; return 401 or throw.
 - Add `Cache-Control: private, no-store` to authenticated route handler responses.
