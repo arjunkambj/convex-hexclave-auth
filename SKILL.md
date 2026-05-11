@@ -67,7 +67,7 @@ export default app;
 
 ## Stack App Imports In Monorepos
 
-Keep Stack app construction in a small module. In a Next.js app, `stack/server.ts` can also expose request helpers for route handlers.
+Keep Stack app construction split by runtime. In a Next.js app, `stack/client.ts` and `stack/server.ts` can use the Next package and expose request helpers for route handlers.
 
 ```ts
 // stack/client.ts
@@ -103,14 +103,26 @@ export const getStackConvexToken = async (request: NextRequest) => {
 
 When using `getStackConvexToken`, narrow the result before passing it to Convex because unauthorized requests return a `NextResponse`.
 
-In a Turborepo, do not import `stackServerApp` from a Next.js route, page, layout, or any module with Next-only side effects. Import from a neutral shared module instead:
+In a Turborepo, Convex code must use its own Convex-safe Stack app module. Do not import the Next client app into Convex, and do not make the Convex server app inherit from `stackClientApp`.
+
+```ts
+// stack/convex.ts
+import { StackServerApp } from "@stackframe/js";
+
+export const stackServerApp = new StackServerApp({
+  projectId: process.env.STACK_PROJECT_ID!,
+  secretServerKey: process.env.STACK_SECRET_SERVER_KEY!,
+});
+```
+
+Convex functions import that Convex-safe module:
 
 ```ts
 // convex/myFunctions.ts
 import { stackServerApp } from "../stack/convex";
 ```
 
-If `stack/server.ts` imports `next/server` for `getStackConvexToken`, do not import that file from Convex functions. Use a Convex-safe Stack module for Convex code, usually with `@stackframe/js`, and keep the Next request helper in the Next app.
+If `stack/server.ts` imports `next/server` for `getStackConvexToken`, do not import that file from Convex functions. Keep the Next request helper in the Next app.
 
 ## Browser Convex Client
 
@@ -439,5 +451,6 @@ The Stack CLI intentionally does not auto-wire `ConvexHttpClient`; review those 
 - Do not expect `getPartialUser` to include teams. It only maps Convex JWT identity claims. Use full `getUser(...)` for `selectedTeam` and `listTeams()`.
 - Do not trust `userId` or `teamId` sent by the browser. Read the user from `ctx.auth` or from the Next.js request, then validate team membership before writing team-owned data.
 - Do not import Stack app instances from Next.js route/page/layout modules into Convex functions. Use a Convex-safe `stack/convex.ts` module or a workspace package.
+- Do not import `stack/client.ts` or use `inheritsFrom: stackClientApp` in Convex code. Convex does not run with the Next client token store.
 - Do not silently continue when `token === ""` or `user == null`; return 401 or throw.
 - Add `Cache-Control: private, no-store` to authenticated route handler responses.
