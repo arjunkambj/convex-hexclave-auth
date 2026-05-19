@@ -1,13 +1,15 @@
 ---
 name: stack-auth-convex
-description: Use when wiring Stack Auth to Convex in any Next.js app. Convex setup, Stack-to-Convex token passing, Convex getCurrentStackUser auth, API route fetchQuery/fetchMutation usage, and anti-patterns that no longer work.
+description: Use when wiring Stack Auth to Convex in any Next.js app. Covers Convex auth setup, Stack-to-Convex token passing, getCurrentStackUser, API route fetchQuery/fetchMutation usage, and obsolete anti-patterns.
 ---
 
 # Stack Auth Convex
 
-Use this as a general Stack Auth + Convex integration skill for any Next.js app.
+Use for Stack Auth + Convex integration in Next.js apps, including Turborepos. Paths may move, but the boundary must stay the same:
 
-This works the same in a Turborepo. Shared packages may move file paths around, but the boundary stays the same: Next.js API routes get the Convex token and pass `{ token }`; Convex functions authorize with `getCurrentStackUser(ctx)`.
+- Next.js API routes get the Convex token and pass `{ token }`.
+- Convex functions authorize with `getCurrentStackUser(ctx)`.
+- Browser/API callers pass business args only; Convex derives user/team ownership from auth.
 
 ## Setup
 
@@ -24,7 +26,7 @@ export default {
 };
 ```
 
-Convex registers the Stack Auth component:
+Register the Stack Auth Convex component:
 
 ```ts
 // convex/convex.config.ts
@@ -32,13 +34,11 @@ import stackAuthComponent from "@stackframe/stack/convex.config";
 import { defineApp } from "convex/server";
 
 const app = defineApp();
-
 app.use(stackAuthComponent);
-
 export default app;
 ```
 
-Next.js API routes use one helper to get the Convex auth token:
+Edit `stack/server.ts` to expose one server-only helper for API routes:
 
 ```ts
 // stack/server.ts
@@ -59,7 +59,7 @@ export const getStackAuthConvexServerToken = async (request: NextRequest) => {
 };
 ```
 
-Convex reads auth from `ctx.auth`, not from Stack server helpers:
+In Convex, read auth from `ctx.auth`, never Stack server helpers:
 
 ```ts
 // convex/stack/auth.ts
@@ -105,99 +105,52 @@ export const getCurrentStackUser = async (ctx: Ctx) => {
 
 ## Usage
 
-Convex query: no `userId` or `teamId` args.
+Convex queries and mutations take business args only. Do not accept `userId`, `teamId`, or `ownerUserId`; derive them from `auth.user`.
 
 ```ts
-import { query } from "./_generated/server";
-import { getCurrentStackUser } from "./stack/auth";
+const auth = await getCurrentStackUser(ctx);
+if (!auth.authenticated) return { ok: false, error: auth.error } as const;
 
-export const list = query({
-  args: {},
-  handler: async (ctx) => {
-    const auth = await getCurrentStackUser(ctx);
+// Query by auth-owned scope.
+const rows = await ctx.db
+  .query("todos")
+  .withIndex("by_team", (q) => q.eq("teamId", auth.user.selectedTeamId))
+  .collect();
 
-    if (!auth.authenticated) {
-      return { ok: false, error: auth.error } as const;
-    }
-
-    const todos = await ctx.db
-      .query("todos")
-      .withIndex("by_team", (q) => q.eq("teamId", auth.user.selectedTeamId))
-      .collect();
-
-    return { ok: true, todos } as const;
-  },
+// Write auth-owned scope.
+await ctx.db.insert("todos", {
+  completed: false,
+  ownerUserId: auth.user.id,
+  teamId: auth.user.selectedTeamId,
+  text: args.text,
 });
 ```
 
-Convex mutation: derive ownership from auth.
-
-```ts
-import { v } from "convex/values";
-import { mutation } from "./_generated/server";
-import { getCurrentStackUser } from "./stack/auth";
-
-export const create = mutation({
-  args: {
-    text: v.string(),
-  },
-  handler: async (ctx, args) => {
-    const auth = await getCurrentStackUser(ctx);
-
-    if (!auth.authenticated) {
-      return { ok: false, error: auth.error } as const;
-    }
-
-    const todoId = await ctx.db.insert("todos", {
-      completed: false,
-      ownerUserId: auth.user.id,
-      teamId: auth.user.selectedTeamId,
-      text: args.text,
-    });
-
-    return { ok: true, todoId } as const;
-  },
-});
-```
-
-API route query: get token, pass token as the third argument.
+API routes get the token, return 401 if missing, and pass `{ token }` as the third argument to `fetchQuery`/`fetchMutation`.
 
 ```ts
 import { api } from "@/convex/_generated/api";
 import { getStackAuthConvexServerToken } from "@/stack/server";
-import { fetchQuery } from "convex/nextjs";
+import { fetchMutation, fetchQuery } from "convex/nextjs";
 import { NextRequest, NextResponse } from "next/server";
 
 export async function GET(request: NextRequest) {
   const token = await getStackAuthConvexServerToken(request);
   if (token == null) return NextResponse.json({ error: "Unauthenticated" }, { status: 401 });
 
-  const result = await fetchQuery(api.todoApi.list, {}, { token });
-
-  return NextResponse.json(result);
+  return NextResponse.json(await fetchQuery(api.todoApi.list, {}, { token }));
 }
-```
-
-API route mutation: only business args go in the second argument.
-
-```ts
-import { api } from "@/convex/_generated/api";
-import { getStackAuthConvexServerToken } from "@/stack/server";
-import { fetchMutation } from "convex/nextjs";
-import { NextRequest, NextResponse } from "next/server";
 
 export async function POST(request: NextRequest) {
   const token = await getStackAuthConvexServerToken(request);
   if (token == null) return NextResponse.json({ error: "Unauthenticated" }, { status: 401 });
 
   const { text } = (await request.json()) as { text: string };
-  const result = await fetchMutation(api.todoApi.create, { text }, { token });
-
-  return NextResponse.json(result);
+  return NextResponse.json(await fetchMutation(api.todoApi.create, { text }, { token }));
 }
 ```
 
-Remember the argument positions:
+Argument positions:
 
 ```ts
 await fetchQuery(api.todoApi.list, {}, { token });
@@ -206,17 +159,16 @@ await fetchMutation(api.todoApi.create, { text }, { token });
 
 ## Anti-Patterns
 
-Do not double authenticate in API routes.
-API routes should only pass `{ token }` to Convex. Convex should call `getCurrentStackUser(ctx)`.
-Do not pass auth scope as Convex arguments.
+Do not double authenticate in API routes. API routes pass `{ token }`; Convex calls `getCurrentStackUser(ctx)`.
+
+Wrong:
 
 ```ts
-// Wrong
 await fetchQuery(api.todoApi.list, { teamId, userId }, { token });
 await fetchMutation(api.todoApi.create, { text, teamId, ownerUserId }, { token });
 ```
 
-Use business args only.
+Right:
 
 ```ts
 await fetchQuery(api.todoApi.list, {}, { token });
@@ -230,16 +182,16 @@ Legacy patterns that no longer work:
 - Creating `stack/convex.ts` or a Convex-side `StackServerApp` for normal queries/mutations. Use `ctx.auth.getUserIdentity()`.
 - `inheritsFrom: stackClientApp` in `StackServerApp`. Use `tokenStore: "nextjs-cookie"`.
 - Passing `teamId`, `userId`, or `ownerUserId` from the browser or API route. Derive them in Convex.
-- Using Convex actions for the normal auth flow. Use queries/mutations with `getCurrentStackUser(ctx)`.
+- Using Convex actions for normal auth flow. Use queries/mutations with `getCurrentStackUser(ctx)`.
 - Using `ConvexHttpClient` as the API route pattern. Use `fetchQuery` and `fetchMutation` from `convex/nextjs`.
-- Helpers that return either a token or `NextResponse`. Prefer `string | null` and let the route return 401.
-- Importing `getConvexProvidersConfig` directly from `@stackframe/stack`. Use `@stackframe/stack/convex-auth.config`.
+- Helpers that return either a token or `NextResponse`. Prefer `string | null`; let the route return 401.
+- Importing `getConvexProvidersConfig` from `@stackframe/stack`. Use `@stackframe/stack/convex-auth.config`.
 
 Rules:
 
 - Do not import `stack/server.ts` into Convex.
 - Do not import Next.js modules into Convex.
-- In a Turborepo, shared packages are fine, but do not move Next.js token-store code into Convex-imported modules.
+- In Turborepos, shared packages are fine, but keep Next.js token-store code out of Convex-imported modules.
 - Do not write env var fallback chains.
 - Do not silently continue when auth is missing.
 - Keep authenticated route responses `Cache-Control: private, no-store`.
