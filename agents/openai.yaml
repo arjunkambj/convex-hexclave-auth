@@ -1,4 +1,4 @@
 interface:
-  display_name: "Stack Auth Convex"
-  short_description: "Stack Auth and Convex auth guidance"
-  default_prompt: "Use $stack-auth-convex to wire Stack Auth into Convex and review the auth flow."
+  display_name: "Hexclave Convex"
+  short_description: "Hexclave and Convex auth guidance"
+  default_prompt: "Use $hexclave-convex to wire Hexclave auth into Convex and review the auth flow."
