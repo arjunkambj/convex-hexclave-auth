@@ -150,30 +150,9 @@ export async function POST(request: NextRequest) {
 }
 ```
 
-Argument positions:
-
-```ts
-await fetchQuery(api.todoApi.list, {}, { token });
-await fetchMutation(api.todoApi.create, { text }, { token });
-```
-
 ## Anti-Patterns
 
 Do not double authenticate in API routes. API routes pass `{ token }`; Convex calls `getCurrentStackUser(ctx)`.
-
-Wrong:
-
-```ts
-await fetchQuery(api.todoApi.list, { teamId, userId }, { token });
-await fetchMutation(api.todoApi.create, { text, teamId, ownerUserId }, { token });
-```
-
-Right:
-
-```ts
-await fetchQuery(api.todoApi.list, {}, { token });
-await fetchMutation(api.todoApi.create, { text }, { token });
-```
 
 Legacy patterns that no longer work:
 
