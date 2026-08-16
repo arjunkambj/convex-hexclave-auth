@@ -1,6 +1,6 @@
 ---
 name: hexclave-convex
-description: Use when wiring Hexclave auth to Convex in any Next.js app. Covers Convex auth setup, Hexclave-to-Convex token passing, getCurrentHexclaveUser, API route fetchQuery/fetchMutation usage, migration from legacy Stack Auth naming, and obsolete anti-patterns.
+description: Use when wiring Hexclave auth to Convex in any Next.js app. Covers Convex auth setup, Hexclave-to-Convex token passing, getCurrentHexclaveUser, API route fetchQuery/fetchMutation usage, and obsolete anti-patterns.
 ---
 
 # Hexclave Convex
@@ -10,14 +10,6 @@ Use for Hexclave + Convex integration in Next.js apps, including Turborepos. Pat
 - Next.js API routes get the Convex token and pass `{ token }`.
 - Convex functions authorize with `getCurrentHexclaveUser(ctx)`.
 - Browser/API callers pass business args only; Convex derives user/team ownership from auth.
-
-Stack Auth is now Hexclave. Prefer `@hexclave/*`, `Hexclave*`, and `HEXCLAVE_*` names in new code. Legacy `@stackframe/*`, `Stack*`, and `STACK_*` names can still work during migration, but do not introduce them unless preserving an existing app's compatibility.
-
-Package migration map:
-
-- `@stackframe/stack` -> `@hexclave/next`
-- `@stackframe/react` -> `@hexclave/react`
-- `@stackframe/js` -> `@hexclave/js`
 
 ## Setup
 
@@ -46,16 +38,35 @@ app.use(hexclaveComponent);
 export default app;
 ```
 
-Edit `hexclave/server.ts` to expose one server-only helper for API routes:
+Create `hexclave/client.ts` for the browser app:
+
+```ts
+// hexclave/client.ts
+import { HexclaveClientApp } from "@hexclave/next";
+
+export const hexclaveClientApp = new HexclaveClientApp({
+  tokenStore: "nextjs-cookie",
+  urls: {
+    default: {
+      type: "hosted",
+    },
+  },
+});
+```
+
+Use `tokenStore: "nextjs-cookie"` in Next.js, `"cookie"` for other web frontends, and `null` for backend environments.
+
+Create `hexclave/server.ts` that inherits from the client app and exposes one helper for API routes:
 
 ```ts
 // hexclave/server.ts
 import "server-only";
 import { HexclaveServerApp } from "@hexclave/next";
 import { NextRequest } from "next/server";
+import { hexclaveClientApp } from "./client";
 
 export const hexclaveServerApp = new HexclaveServerApp({
-  tokenStore: "nextjs-cookie",
+  inheritsFrom: hexclaveClientApp,
 });
 
 export const getHexclaveConvexServerToken = async (request: NextRequest) => {
@@ -71,65 +82,61 @@ In Convex, read auth from `ctx.auth`, never Hexclave server helpers:
 
 ```ts
 // convex/hexclave/auth.ts
-import { z } from "zod";
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 
-type Ctx = MutationCtx | QueryCtx;
+type AuthCtx = MutationCtx | QueryCtx;
 
-const HexclaveUserSchema = z.object({
-  id: z.string(),
-  email: z.string(),
-  isAnonymous: z.boolean(),
-  isRestricted: z.boolean(),
-  name: z.string(),
-  role: z.literal("authenticated"),
-  selectedTeamId: z.string(),
-});
-
-export const getCurrentHexclaveUser = async (ctx: Ctx) => {
-  const identity = await ctx.auth.getUserIdentity();
-
-  if (identity == null) {
-    return { authenticated: false, error: "Unauthenticated." } as const;
-  }
-
-  const user = HexclaveUserSchema.safeParse({
-    id: identity.subject,
-    email: identity.email,
-    isAnonymous: identity.is_anonymous,
-    isRestricted: identity.is_restricted,
-    name: identity.name,
-    role: identity.role,
-    selectedTeamId: identity.selected_team_id,
-  });
-
-  if (!user.success) {
-    return { authenticated: false, error: "Missing Hexclave user claims." } as const;
-  }
-
-  return { authenticated: true, user: user.data } as const;
+export type HexclaveUser = {
+  id: string;
+  email: string;
+  name: string;
+  selectedTeamId: string;
+  isAnonymous: boolean;
+  isRestricted: boolean;
 };
+
+export async function getCurrentHexclaveUser(
+  ctx: AuthCtx,
+): Promise<HexclaveUser | null> {
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity || identity.role !== "authenticated") return null;
+
+  const { subject: id, email, name, selected_team_id: teamId } = identity;
+
+  if (!id || !email || !name || typeof teamId !== "string" || !teamId) {
+    return null;
+  }
+
+  return {
+    id,
+    email,
+    name,
+    selectedTeamId: teamId,
+    isAnonymous: Boolean(identity.is_anonymous),
+    isRestricted: Boolean(identity.is_restricted),
+  };
+}
 ```
 
 ## Usage
 
-Convex queries and mutations take business args only. Do not accept `userId`, `teamId`, or `ownerUserId`; derive them from `auth.user`.
+Convex queries and mutations take business args only. Do not accept `userId`, `teamId`, or `ownerUserId`; derive them from the Hexclave user.
 
 ```ts
-const auth = await getCurrentHexclaveUser(ctx);
-if (!auth.authenticated) return { ok: false, error: auth.error } as const;
+const user = await getCurrentHexclaveUser(ctx);
+if (!user) return { ok: false, error: "Unauthenticated." } as const;
 
 // Query by auth-owned scope.
 const rows = await ctx.db
   .query("todos")
-  .withIndex("by_team", (q) => q.eq("teamId", auth.user.selectedTeamId))
+  .withIndex("by_team", (q) => q.eq("teamId", user.selectedTeamId))
   .collect();
 
 // Write auth-owned scope.
 await ctx.db.insert("todos", {
   completed: false,
-  ownerUserId: auth.user.id,
-  teamId: auth.user.selectedTeamId,
+  ownerUserId: user.id,
+  teamId: user.selectedTeamId,
   text: args.text,
 });
 ```
@@ -167,14 +174,12 @@ Legacy patterns that no longer work:
 - `hexclaveServerApp.getPartialUser({ from: "convex", ctx })` in Convex functions. Use `getCurrentHexclaveUser(ctx)`.
 - Loading a full Hexclave user in an API route before calling Convex. This creates double authentication.
 - Creating `hexclave/convex.ts` or a Convex-side `HexclaveServerApp` for normal queries/mutations. Use `ctx.auth.getUserIdentity()`.
-- `inheritsFrom: hexclaveClientApp` in `HexclaveServerApp`. Use `tokenStore: "nextjs-cookie"`.
+- Reconstructing project keys, `tokenStore`, or `urls` on `HexclaveServerApp`. Use `inheritsFrom: hexclaveClientApp`.
 - Passing `teamId`, `userId`, or `ownerUserId` from the browser or API route. Derive them in Convex.
 - Using Convex actions for normal auth flow. Use queries/mutations with `getCurrentHexclaveUser(ctx)`.
 - Using `ConvexHttpClient` as the API route pattern. Use `fetchQuery` and `fetchMutation` from `convex/nextjs`.
 - Helpers that return either a token or `NextResponse`. Prefer `string | null`; let the route return 401.
 - Importing `getConvexProvidersConfig` from `@hexclave/next`. Use `@hexclave/next/convex-auth.config`.
-- Hardcoding `https://api.stack-auth.com` in new Hexclave SDK projects. Use `https://api.hexclave.com`.
-- Using `@stackframe/*`, `Stack*`, `STACK_*`, or `X-Stack-*` names in new code unless intentionally maintaining a legacy migration surface.
 
 Rules:
 
