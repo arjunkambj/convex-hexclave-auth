@@ -1,6 +1,6 @@
 ---
 name: hexclave-convex
-description: Use when wiring Hexclave auth to Convex in any Next.js app. Covers Convex auth setup, Hexclave-to-Convex token passing, getCurrentHexclaveUser, API route fetchQuery/fetchMutation usage, and obsolete anti-patterns.
+description: Use when wiring Hexclave auth to Convex in any Next.js app. Covers Convex auth setup, Hexclave-to-Convex token passing, getCurrentHexclaveUser, API route fetchQuery/fetchMutation usage, which Hexclave calls hit the network and how to avoid slow sequential ones, and obsolete anti-patterns.
 ---
 
 # Hexclave Convex
@@ -164,6 +164,32 @@ export async function POST(request: NextRequest) {
   return NextResponse.json(await fetchMutation(api.todoApi.create, { text }, { token }));
 }
 ```
+
+## Performance
+
+Every Hexclave SDK call that is not read from the token is one HTTPS round trip to the Hexclave API. Sequential calls add up, so know which is which.
+
+No network, read from the JWT:
+
+- `ctx.auth.getUserIdentity()` in Convex. This is why `getCurrentHexclaveUser(ctx)` is free.
+- `getPartialUser({ from: "token" })` and `usePartialUser({ from: "token" })` in Next.js.
+
+The JWT carries `sub`, `name`, `email`, `email_verified`, `selected_team_id`, `is_anonymous`, `is_restricted`. The token partial user exposes less than that: `id`, `displayName`, `primaryEmail`, `primaryEmailVerified`, and the anonymous/restricted/MFA flags. It has no `selectedTeamId` and no `profileImageUrl`. When the team is needed, read it in Convex or call `getUser()`; do not decode the cookie by hand.
+
+`getPartialUser({ from: "token" })` returns `null` once the access token expires (10 minutes by default) even though the user is still signed in, because it only decodes the token and never refreshes it. Never use it alone as an auth gate or redirect condition:
+
+```ts
+const user =
+  (await hexclaveServerApp.getPartialUser({ from: "token" })) ??
+  (await hexclaveServerApp.getUser());
+```
+
+One round trip each, never in the token: `getUser()`, permissions, team members, invitations, API keys.
+
+- `getUser()` already returns `selectedTeam` as a full `ServerTeam`. Call `user.selectedTeam.listUsers()` directly; a following `getTeam(user.selectedTeam.id)` is a wasted round trip.
+- Run independent calls together with `Promise.all`.
+- Client hooks (`useUser`, `usePermission`, `team.useApiKeys`) do not run during SSR and suspend on first use, one round trip each, in sequence when chained through one component tree. After that they are served from the SDK's in-memory cache.
+- `usePermission(team, id)` reads the single `usePermissions(team)` list, so every permission check for a team shares one fetch.
 
 ## Anti-Patterns
 
