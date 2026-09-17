@@ -186,8 +186,9 @@ const user =
 
 One round trip each, never in the token: `getUser()`, permissions, team members, invitations, API keys.
 
-- `getUser()` already returns `selectedTeam` as a full `ServerTeam`. Call `user.selectedTeam.listUsers()` directly; a following `getTeam(user.selectedTeam.id)` is a wasted round trip.
-- Run independent calls together with `Promise.all`.
+- `user.selectedTeam` from the server `getUser()` is typed and documented as the client `Team`. It is enough for `id`, `displayName`, and permission checks. Server-only data (member emails, `lastActiveAt`, invitations) needs `hexclaveServerApp.getTeam(id)`, which is one more round trip. Do not cast `selectedTeam` to `ServerTeam` to skip it.
+- Only call `getTeam(id)` when that server-only data is needed; never just to read the team name or id.
+- Run independent calls together with `Promise.all`, e.g. `team.listUsers()` and `team.listInvitations()`.
 - Client hooks (`useUser`, `usePermission`, `team.useApiKeys`) do not run during SSR and suspend on first use, one round trip each, in sequence when chained through one component tree. After that they are served from the SDK's in-memory cache.
 - `usePermission(team, id)` reads the single `usePermissions(team)` list, so every permission check for a team shares one fetch.
 
